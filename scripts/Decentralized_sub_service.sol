@@ -33,7 +33,10 @@ error PlanNotExists(uint64 planId);
 error PlanExists(uint64 planId);
 error NotSubscribed(address subscriber,uint64 planId);
 error DurationCantBeZero();
-
+error NothingToWithdraw();
+error WithdrawFailed();
+error RefundFailed();
+error AlreadySubed();
 
 contract Decentralized_sub_service{
 
@@ -41,7 +44,7 @@ contract Decentralized_sub_service{
     struct plan{
         uint256 price;
         uint32 duration;
-        address provider;
+        address  provider;
     }
 
 
@@ -58,12 +61,16 @@ contract Decentralized_sub_service{
 
 
     /** Events */
-    event subscribed(address subscriber, uint64 planId, uint256 totalAmountPaid, uint256 startTimeStamp, uint256 expiryTimeStamp);
+    event PlanSubscribed(address subscriber, uint64 planId, uint256 totalAmountPaid, uint256 startTimeStamp, uint256 expiryTimeStamp);
+    event PlanRenewed(address subscriber, uint64 planId, uint256 totalAmountPaid, uint256 startTimeStamp, uint256 expiryTimeStamp);
+    event PlanCreated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance);
+    event PlanUpdated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance);
+    event FundsWithdrawn(address provider, uint256 amount);
 
     /** Modifiers*/
 
     modifier onlyProvider(){
-        if(isProvider[msg.sender]){
+        if(!isProvider[msg.sender]){
             revert NotProvider(msg.sender);
         }
         _;
@@ -101,19 +108,45 @@ contract Decentralized_sub_service{
         Plans[_planId] = plan(_price, _duration, msg.sender);
         ProviderBalance[msg.sender] = 0;
         isProvider[msg.sender] = true;
+
+        emit PlanCreated(_planId, _price, _duration, msg.sender,ProviderBalance[msg.sender]);
         
     }
 
-    function subscribe(uint64 _planId) external payable {
+    function updatePlan(uint64 _planId, uint256 _price, uint32 _duration) external planExists(_planId) onlyProvider{
+        if(_duration == 0){
+            revert DurationCantBeZero();
+        }
+
+        Plans[_planId].price = _price;
+        Plans[_planId].duration = _duration;
+
+        emit PlanUpdated(_planId, _price, _duration, msg.sender, ProviderBalance[msg.sender]);
+    }
+
+    function subscribe(uint64 _planId) external payable planExists(_planId){
         if(msg.value < Plans[_planId].price){
             revert InsufficientFunds(Plans[_planId].price, msg.value);
         }
 
+        if(subscriptions[_planId][msg.sender].expiryTimeStamp > block.timestamp){
+            revert AlreadySubed();
+        }
+
+        uint256 overpaidAmount = msg.value - Plans[_planId].price;
+
+        
         subscriptions[_planId][msg.sender].startTimeStamp = block.timestamp;
         subscriptions[_planId][msg.sender].expiryTimeStamp = block.timestamp + Plans[_planId].duration;
         subscriptions[_planId][msg.sender].totalAmountPaid  += Plans[_planId].price;
+        ProviderBalance[Plans[_planId].provider] += Plans[_planId].price;
 
-        emit subscribed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
+        if (overpaidAmount > 0) {
+            (bool success, ) = payable(msg.sender).call{value: overpaidAmount}("");
+            require(success, RefundFailed());
+        }
+
+        emit PlanSubscribed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
 
     }
 
@@ -124,8 +157,9 @@ contract Decentralized_sub_service{
 
         subscriptions[_planId][msg.sender].expiryTimeStamp = subscriptions[_planId][msg.sender].startTimeStamp + Plans[_planId].duration;
         subscriptions[_planId][msg.sender].totalAmountPaid  += Plans[_planId].price;
+        ProviderBalance[Plans[_planId].provider] += Plans[_planId].price;
 
-        emit subscribed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
+        emit PlanRenewed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
     }
 
     function isActive(uint64 planId) external view returns(bool){
@@ -137,7 +171,20 @@ contract Decentralized_sub_service{
     }
 
     function withdrawFunds() external onlyProvider(){
+        uint256 amount = ProviderBalance[msg.sender];
+        if(amount == 0){
+            revert NothingToWithdraw();
+        } 
+        ProviderBalance[msg.sender] = 0;
+
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
         
+        if(!success){
+            ProviderBalance[msg.sender] = amount;
+            revert WithdrawFailed();
+        }
+
+        emit FundsWithdrawn(msg.sender, amount);
     }
     
 }
