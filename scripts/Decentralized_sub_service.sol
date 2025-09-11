@@ -100,13 +100,12 @@ contract Decentralized_sub_service{
 
     /** Functions */
 
-    function creatPlan(uint64 _planId, uint256 _price, uint32 _duration) external planNotExists(_planId){
+    function createPlan(uint64 _planId, uint256 _price, uint32 _duration) external planNotExists(_planId){
         if(_duration == 0){
             revert DurationCantBeZero();
         }
 
         Plans[_planId] = plan(_price, _duration, msg.sender);
-        ProviderBalance[msg.sender] = 0;
         isProvider[msg.sender] = true;
 
         emit PlanCreated(_planId, _price, _duration, msg.sender,ProviderBalance[msg.sender]);
@@ -155,14 +154,24 @@ contract Decentralized_sub_service{
             revert InsufficientFunds(Plans[_planId].price, msg.value);
         }
 
-        subscriptions[_planId][msg.sender].expiryTimeStamp = subscriptions[_planId][msg.sender].startTimeStamp + Plans[_planId].duration;
+        
+        subscriptions[_planId][msg.sender].startTimeStamp = block.timestamp > subscriptions[_planId][msg.sender].expiryTimeStamp ? block.timestamp : subscriptions[_planId][msg.sender].startTimeStamp;
+        subscriptions[_planId][msg.sender].expiryTimeStamp = block.timestamp > subscriptions[_planId][msg.sender].startTimeStamp ?  block.timestamp + Plans[_planId].duration : subscriptions[_planId][msg.sender].expiryTimeStamp + Plans[_planId].duration;
         subscriptions[_planId][msg.sender].totalAmountPaid  += Plans[_planId].price;
         ProviderBalance[Plans[_planId].provider] += Plans[_planId].price;
 
         emit PlanRenewed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
     }
 
-    function isActive(uint64 planId) external view returns(bool){
+    function isActive(uint64 planId, address user) public view returns(bool){
+        if(subscriptions[planId][user].expiryTimeStamp > block.timestamp){
+            return true;
+        }else{
+            return false;
+        }
+    }
+
+    function isActive(uint64 planId) public view returns(bool){
         if(subscriptions[planId][msg.sender].expiryTimeStamp > block.timestamp){
             return true;
         }else{
