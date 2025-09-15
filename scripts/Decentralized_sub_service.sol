@@ -37,14 +37,20 @@ error NothingToWithdraw();
 error WithdrawFailed();
 error RefundFailed();
 error AlreadySubed();
+error PlanAlreadyActive();
+error NothingToRefund();
+error PlanNotActive();
+
 
 contract Decentralized_sub_service{
 
     /** State variables */
-    struct plan{
+    struct plan {
         uint256 price;
+        uint256 deactivationTimeStamp;
         uint32 duration;
-        address  provider;
+        bool isActive;
+        address provider;
     }
 
 
@@ -54,18 +60,22 @@ contract Decentralized_sub_service{
         uint256 totalAmountPaid;
     }
 
-    mapping(address => uint256) public ProviderBalance;
-    mapping(address => bool) public isProvider;
+    struct providerDetails{
+        uint64[] planIds;
+        uint256 providerBalance;
+        bool isProvider; 
+    }
+
+    mapping(address => providerDetails) public ProviderPlans;
     mapping (uint64 => plan) public Plans;
     mapping(uint64 => mapping (address => subscription)) public subscriptions;
-    mapping (address => uint64) public providerPlans;
 
 
     /** Events */
     event PlanSubscribed(address subscriber, uint64 planId, uint256 totalAmountPaid, uint256 startTimeStamp, uint256 expiryTimeStamp);
     event PlanRenewed(address subscriber, uint64 planId, uint256 totalAmountPaid, uint256 startTimeStamp, uint256 expiryTimeStamp);
-    event PlanCreated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance);
-    event PlanUpdated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance);
+    event PlanCreated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance, bool isActive,uint256 deactivationTimeStamp);
+    event PlanUpdated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance,bool isActive,uint256 deactivationTimeStamp);
     event FundsWithdrawn(address provider, uint256 amount);
     event RefundIssued(uint64 planId, address provider , uint256 overpaidAmount);
     event subscriptionCancelled(uint64 planId, address user, uint256 AmountRefunded);
@@ -73,7 +83,7 @@ contract Decentralized_sub_service{
     /** Modifiers*/
 
     modifier onlyProvider(){
-        if(!isProvider[msg.sender]){
+        if(!ProviderPlans[msg.sender].isProvider){
             revert NotProvider(msg.sender);
         }
         _;
@@ -94,7 +104,7 @@ contract Decentralized_sub_service{
     }
 
     modifier onlySubscribers(uint64 _planId){
-        if(subscriptions[_planId][msg.sender].expiryTimeStamp < block.timestamp){
+        if(subscriptions[_planId][msg.sender].startTimeStamp == 0 ){
             revert NotSubscribed(msg.sender, _planId);
         }
         _;
@@ -103,16 +113,18 @@ contract Decentralized_sub_service{
 
     /** Functions */
 
+    /** External Functions*/
+
     function createPlan(uint64 _planId, uint256 _price, uint32 _duration) external planNotExists(_planId){
         if(_duration == 0){
             revert DurationCantBeZero();
         }
 
-        Plans[_planId] = plan(_price, _duration, msg.sender);
-        isProvider[msg.sender] = true;
-        providerPlans[msg.sender] = _planId;
+        Plans[_planId] = plan(_price, 0, _duration,true, msg.sender);
+        ProviderPlans[msg.sender].planIds.push(_planId);
+        ProviderPlans[msg.sender].isProvider = true;
 
-        emit PlanCreated(_planId, _price, _duration, msg.sender,ProviderBalance[msg.sender]);
+        emit PlanCreated(_planId, _price, _duration, msg.sender,ProviderPlans[msg.sender].providerBalance,true,0);
         
     }
 
@@ -124,10 +136,13 @@ contract Decentralized_sub_service{
         Plans[_planId].price = _price;
         Plans[_planId].duration = _duration;
 
-        emit PlanUpdated(_planId, _price, _duration, msg.sender, ProviderBalance[msg.sender]);
+        emit PlanUpdated(_planId, _price, _duration, msg.sender, ProviderPlans[msg.sender].providerBalance,true,0);
     }
 
     function subscribe(uint64 _planId) external payable planExists(_planId){
+        if(!Plans[_planId].isActive ){
+            revert PlanNotActive();
+        }
         if(msg.value < Plans[_planId].price){
             revert InsufficientFunds(Plans[_planId].price, msg.value);
         }
@@ -142,7 +157,7 @@ contract Decentralized_sub_service{
         subscriptions[_planId][msg.sender].startTimeStamp = block.timestamp;
         subscriptions[_planId][msg.sender].expiryTimeStamp = block.timestamp + Plans[_planId].duration;
         subscriptions[_planId][msg.sender].totalAmountPaid  += Plans[_planId].price;
-        ProviderBalance[Plans[_planId].provider] += Plans[_planId].price;
+        ProviderPlans[Plans[_planId].provider].providerBalance += Plans[_planId].price;
 
         if (overpaidAmount > 0) {
             (bool success, ) = payable(msg.sender).call{value: overpaidAmount}("");
@@ -155,6 +170,11 @@ contract Decentralized_sub_service{
     }
 
     function renew(uint64 _planId) external payable onlySubscribers(_planId) {
+
+        if(!Plans[_planId].isActive ){
+            revert PlanNotActive();
+        }
+
         if(msg.value < Plans[_planId].price){
             revert InsufficientFunds(Plans[_planId].price, msg.value);
         }
@@ -163,25 +183,60 @@ contract Decentralized_sub_service{
         subscriptions[_planId][msg.sender].startTimeStamp = block.timestamp > subscriptions[_planId][msg.sender].expiryTimeStamp ? block.timestamp : subscriptions[_planId][msg.sender].startTimeStamp;
         subscriptions[_planId][msg.sender].expiryTimeStamp = block.timestamp > subscriptions[_planId][msg.sender].startTimeStamp ?  block.timestamp + Plans[_planId].duration : subscriptions[_planId][msg.sender].expiryTimeStamp + Plans[_planId].duration;
         subscriptions[_planId][msg.sender].totalAmountPaid  += Plans[_planId].price;
-        ProviderBalance[Plans[_planId].provider] += Plans[_planId].price;
+        ProviderPlans[Plans[_planId].provider].providerBalance += Plans[_planId].price;
 
         emit PlanRenewed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
     }
 
-    function cancelSubscription(uint64 _planId) external onlySubscribers(_planId){
-        if(subscriptions[_planId][msg.sender].expiryTimeStamp > block.timestamp){
+    function withdrawFunds() external onlyProvider(){
+        uint256 amount = ProviderPlans[msg.sender].providerBalance ;
 
-            uint256 unusedAmount = (subscriptions[_planId][msg.sender].expiryTimeStamp - block.timestamp) * Plans[_planId].price / Plans[_planId].duration;
-            (bool success, ) = payable(msg.sender).call{value: unusedAmount}("");
-            require(success, RefundFailed());
+        if(amount == 0){
+            revert NothingToWithdraw();
+        } 
 
-            emit subscriptionCancelled(_planId, msg.sender, unusedAmount);
+        ProviderPlans[msg.sender].providerBalance = 0;
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        
+        if(!success){
+            ProviderPlans[msg.sender].providerBalance = amount;
+            revert WithdrawFailed();
         }
 
-        emit subscriptionCancelled(_planId, msg.sender, 0);
+        emit FundsWithdrawn(msg.sender, amount);
     }
 
-    function isActive(uint64 planId, address user) public view returns(bool){
+    function disablePlan(uint64 _planId) external onlyProvider{
+        Plans[_planId].isActive = false;
+        Plans[_planId].deactivationTimeStamp = block.timestamp;
+        emit PlanUpdated(_planId, Plans[_planId].price, Plans[_planId].duration, msg.sender, ProviderPlans[msg.sender].providerBalance,false,block.timestamp);
+
+    }   
+
+    function reActivatePlan(uint64 _planId) external onlyProvider planExists(_planId) {
+        plan storage p = Plans[_planId];
+        if (p.isActive) revert PlanAlreadyActive();
+
+        p.isActive = true;
+        p.deactivationTimeStamp = 0;
+
+        emit PlanUpdated(_planId, p.price, p.duration, msg.sender, ProviderPlans[msg.sender].providerBalance, true, 0);
+    }
+
+    function cancelSubscription(uint64 _planId) external onlySubscribers(_planId) {
+        uint256 refunded = _processRefund(_planId, msg.sender, block.timestamp);
+        emit subscriptionCancelled(_planId, msg.sender, refunded);
+    }
+
+    function claimRefund(uint64 _planId) external planExists(_planId) {
+        if (Plans[_planId].isActive) revert PlanAlreadyActive();
+        uint256 refunded = _processRefund(_planId, msg.sender, Plans[_planId].deactivationTimeStamp);
+        emit subscriptionCancelled(_planId, msg.sender, refunded);
+    }
+
+    /** Public Functions*/
+
+    function isSubscriptionActive(uint64 planId, address user) public view returns(bool){
         if(subscriptions[planId][user].expiryTimeStamp > block.timestamp){
             return true;
         }else{
@@ -189,7 +244,7 @@ contract Decentralized_sub_service{
         }
     }
 
-    function isActive(uint64 planId) public view returns(bool){
+    function isSubscriptionActive(uint64 planId) public view returns(bool){
         if(subscriptions[planId][msg.sender].expiryTimeStamp > block.timestamp){
             return true;
         }else{
@@ -197,21 +252,39 @@ contract Decentralized_sub_service{
         }
     }
 
-    function withdrawFunds() external onlyProvider(){
-        uint256 amount = ProviderBalance[msg.sender];
-        if(amount == 0){
-            revert NothingToWithdraw();
-        } 
-        ProviderBalance[msg.sender] = 0;
+    
 
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
-        
-        if(!success){
-            ProviderBalance[msg.sender] = amount;
-            revert WithdrawFailed();
+    
+
+    
+    /** Internal Functions*/
+
+    function _processRefund(uint64 _planId, address user, uint256 endTime) internal returns (uint256) {
+        subscription storage sub = subscriptions[_planId][user];
+        if (sub.expiryTimeStamp <= endTime) revert NotSubscribed(user, _planId);
+
+        uint256 unusedAmount = (sub.expiryTimeStamp - endTime) * Plans[_planId].price / Plans[_planId].duration;
+
+        sub.expiryTimeStamp = 0; // prevent double refunds
+
+        providerDetails storage provider = ProviderPlans[Plans[_planId].provider];
+        if (provider.providerBalance >= unusedAmount) {
+            provider.providerBalance -= unusedAmount;
+        } else {
+            unusedAmount = provider.providerBalance;
+            provider.providerBalance = 0;
         }
 
-        emit FundsWithdrawn(msg.sender, amount);
+        (bool success, ) = payable(user).call{value: unusedAmount}("");
+        require(success, RefundFailed());
+
+        return unusedAmount;
+    }
+
+    /** View functions */
+
+    function getProviderPlans(address provider) external view returns (uint64[] memory) {
+        return ProviderPlans[provider].planIds;
     }
     
 }
