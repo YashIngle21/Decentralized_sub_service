@@ -58,6 +58,7 @@ contract Decentralized_sub_service{
     mapping(address => bool) public isProvider;
     mapping (uint64 => plan) public Plans;
     mapping(uint64 => mapping (address => subscription)) public subscriptions;
+    mapping (address => uint64) public providerPlans;
 
 
     /** Events */
@@ -66,6 +67,8 @@ contract Decentralized_sub_service{
     event PlanCreated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance);
     event PlanUpdated(uint64 planId, uint256 price, uint256 duration, address provider , uint256 providerBalance);
     event FundsWithdrawn(address provider, uint256 amount);
+    event RefundIssued(uint64 planId, address provider , uint256 overpaidAmount);
+    event subscriptionCancelled(uint64 planId, address user, uint256 AmountRefunded);
 
     /** Modifiers*/
 
@@ -107,6 +110,7 @@ contract Decentralized_sub_service{
 
         Plans[_planId] = plan(_price, _duration, msg.sender);
         isProvider[msg.sender] = true;
+        providerPlans[msg.sender] = _planId;
 
         emit PlanCreated(_planId, _price, _duration, msg.sender,ProviderBalance[msg.sender]);
         
@@ -143,10 +147,11 @@ contract Decentralized_sub_service{
         if (overpaidAmount > 0) {
             (bool success, ) = payable(msg.sender).call{value: overpaidAmount}("");
             require(success, RefundFailed());
+            emit RefundIssued(_planId, msg.sender, overpaidAmount);
         }
 
         emit PlanSubscribed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
-
+    
     }
 
     function renew(uint64 _planId) external payable onlySubscribers(_planId) {
@@ -161,6 +166,19 @@ contract Decentralized_sub_service{
         ProviderBalance[Plans[_planId].provider] += Plans[_planId].price;
 
         emit PlanRenewed(msg.sender , _planId, subscriptions[_planId][msg.sender].totalAmountPaid, subscriptions[_planId][msg.sender].startTimeStamp, subscriptions[_planId][msg.sender].expiryTimeStamp);
+    }
+
+    function cancelSubscription(uint64 _planId) external onlySubscribers(_planId){
+        if(subscriptions[_planId][msg.sender].expiryTimeStamp > block.timestamp){
+
+            uint256 unusedAmount = (subscriptions[_planId][msg.sender].expiryTimeStamp - block.timestamp) * Plans[_planId].price / Plans[_planId].duration;
+            (bool success, ) = payable(msg.sender).call{value: unusedAmount}("");
+            require(success, RefundFailed());
+
+            emit subscriptionCancelled(_planId, msg.sender, unusedAmount);
+        }
+
+        emit subscriptionCancelled(_planId, msg.sender, 0);
     }
 
     function isActive(uint64 planId, address user) public view returns(bool){
